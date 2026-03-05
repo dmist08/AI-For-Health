@@ -1,14 +1,19 @@
+"""
+create_dataset.py — Signal preprocessing and windowing pipeline.
+
+Usage:
+    python scripts/create_dataset.py -in_dir "Data" -out_dir "Dataset"
+"""
 import os
 import argparse
 import pickle
-import logging
 from pathlib import Path
-import pandas as pd
 import numpy as np
-from scipy.signal import butter, filtfilt
+import pandas as pd
+from scipy.signal import butter, filtfilt, resample_poly
 from tqdm import tqdm
-
 import sys
+
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.append(str(PROJECT_ROOT))
 from scripts.parsers import parse_signal_file, parse_events_file
@@ -17,185 +22,202 @@ from src.utils import setup_logger
 
 logger = setup_logger("CreateDataset")
 
-def apply_bandpass(signal: np.ndarray, fs: float, lowcut: float, highcut: float, order: int = 4) -> np.ndarray:
-    """Applies a zero-phase Butterworth bandpass filter to breathing signals."""
-    nyquist = 0.5 * fs
-    low = lowcut / nyquist
-    high = highcut / nyquist
-    b, a = butter(order, [low, high], btype='bandpass')
+
+# ─── Signal Processing Helpers ───────────────────────────────────────────────
+
+def apply_bandpass(signal: np.ndarray, fs: float, lowcut: float = 0.17,
+                   highcut: float = 0.40, order: int = 4) -> np.ndarray:
+    """Zero-phase Butterworth bandpass filter for breathing signals (Flow, Thoracic)."""
+    nyq = 0.5 * fs
+    b, a = butter(order, [lowcut / nyq, highcut / nyq], btype='bandpass')
     return filtfilt(b, a, signal)
 
-def apply_lowpass(signal: np.ndarray, fs: float, cutoff: float = 1.0, order: int = 2) -> np.ndarray:
-    """Applies a zero-phase Butterworth lowpass filter to SpO2."""
-    nyquist = 0.5 * fs
-    normal_cutoff = cutoff / nyquist
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+def apply_lowpass(signal: np.ndarray, fs: float, cutoff: float = 1.0,
+                  order: int = 2) -> np.ndarray:
+    """Zero-phase Butterworth lowpass filter for SpO2 (removes sensor jitter)."""
+    nyq = 0.5 * fs
+    b, a = butter(order, cutoff / nyq, btype='low')
     return filtfilt(b, a, signal)
 
-def extract_windows(series: pd.Series, fs: int, window_sec: int, step_sec: int) -> list:
+def upsample_spo2(spo2_values: np.ndarray, from_fs: int = 4,
+                  to_fs: int = 32) -> np.ndarray:
     """
-    Extracts continuous signal windows. 
-    Assumes `series.index` is monotonic time in seconds relative to recording start.
-    We iterate over time (not just purely by array slice) to handle potential gaps,
-    but here we slice by array indices assuming no mid-stream sensor gaps as per dataset spec.
+    Upsample SpO2 from 4Hz to 32Hz using polyphase resampling.
+    This gives it the same length as the Flow/Thoracic arrays so all 3 channels
+    can be stacked into a single (3, N) tensor.
     """
-    window_pts = window_sec * fs
-    step_pts = step_sec * fs
-    values = series.values
-    times = series.index.values
-    
-    windows = []
-    start_times = []
-    
-    for start_idx in range(0, len(values) - window_pts + 1, step_pts):
-        windows.append(values[start_idx : start_idx + window_pts])
-        start_times.append(times[start_idx])
-        
-    return windows, start_times
+    return resample_poly(spo2_values, up=to_fs, down=from_fs)
 
-def get_window_label(win_start: float, win_duration: float, df_events: pd.DataFrame) -> str:
-    """Assigns label string to a window if an event overlaps by >50% (>15s)."""
+
+# ─── Windowing & Labeling ─────────────────────────────────────────────────────
+
+def label_to_int(label: str) -> int:
+    """
+    Binary classification:
+        0 = Normal
+        1 = Event (Hypopnea or any Apnea variant)
+    """
+    return 0 if label.strip() == "Normal" else 1
+
+def get_window_label(win_start: float, win_sec: int,
+                     df_events: pd.DataFrame) -> str:
+    """
+    Assigns a label to a 30-second window using the >50% overlap rule.
+    If any event overlaps more than 15 seconds with this window, return that event.
+    """
     if df_events.empty:
         return "Normal"
-        
-    win_end = win_start + win_duration
-    required_overlap = win_duration * 0.5
 
-    for _, event in df_events.iterrows():
-        ev_start = event['start_sec']
-        ev_duration = event['duration_sec']
-        ev_end = ev_start + ev_duration
-        label = event['label']
-        
-        # Calculate intersection
-        overlap_start = max(win_start, ev_start)
-        overlap_end = min(win_end, ev_end)
-        overlap = max(0, overlap_end - overlap_start)
-        
-        if overlap > required_overlap:
-            return str(label).strip()
-            
+    win_end = win_start + win_sec
+    threshold = win_sec * 0.5
+
+    for _, ev in df_events.iterrows():
+        ev_start = ev['start_sec']
+        ev_end = ev_start + ev['duration_sec']
+        overlap = max(0, min(win_end, ev_end) - max(win_start, ev_start))
+        if overlap > threshold:
+            return str(ev['label']).strip()
+
     return "Normal"
 
-def map_label_to_int(label: str) -> int:
-    """Map string classes to simple integers for ML."""
-    label_map = {
-        "Normal": 0,
-        "Hypopnea": 1,
-        "Obstructive Apnea": 2
-    }
-    return label_map.get(label, 0)
+def extract_windows(signal: np.ndarray, fs: int, window_sec: int,
+                    step_sec: int) -> tuple[list, list]:
+    """Slides a fixed-length window over a signal, returning (windows, start_indices)."""
+    win_pts = window_sec * fs
+    step_pts = step_sec * fs
+    windows, starts = [], []
+    for i in range(0, len(signal) - win_pts + 1, step_pts):
+        windows.append(signal[i:i + win_pts])
+        starts.append(i / fs)
+    return windows, starts
 
-def process_participant(participant_dir: str):
-    p_path = Path(participant_dir)
-    p_id = p_path.name
-    
+
+# ─── Per-Participant Processing ───────────────────────────────────────────────
+
+def process_participant(p_dir: Path) -> dict | None:
+    p_id = p_dir.name
+
+    # 1. Load and parse signals
     try:
-        flow, start_time = parse_signal_file(str(p_path / "nasal_airflow.txt"))
-        thorac, _ = parse_signal_file(str(p_path / "thoracic_movement.txt"))
-        spo2, _ = parse_signal_file(str(p_path / "spo2.txt"))
-        
-        events_path = p_path / "flow_events.txt"
-        if events_path.exists():
-            df_events = parse_events_file(str(events_path), start_time)
-        else:
-            df_events = pd.DataFrame()
-            logger.warning(f"No events file found for {p_id}. Defaulting to Normal windows.")
-            
+        flow, rec_start = parse_signal_file(str(p_dir / "nasal_airflow.txt"))
+        thorac, _ = parse_signal_file(str(p_dir / "thoracic_movement.txt"))
+        spo2, _ = parse_signal_file(str(p_dir / "spo2.txt"))
     except Exception as e:
-        logger.error(f"Failed loading parsing for {p_id}: {e}")
+        logger.error(f"{p_id}: Failed to load signals — {e}")
         return None
 
-    # Step 1: Filter
-    flow.loc[:] = apply_bandpass(flow.values, fs=config.FS_FLOW, lowcut=config.LOWCUT, highcut=config.HIGHCUT, order=config.ORDER)
-    thorac.loc[:] = apply_bandpass(thorac.values, fs=config.FS_FLOW, lowcut=config.LOWCUT, highcut=config.HIGHCUT, order=config.ORDER)
-    spo2.loc[:] = apply_lowpass(spo2.values, fs=config.FS_SPO2, cutoff=1.0) # Smooth SpO2 jitter
+    # 2. Load events
+    events_path = p_dir / "flow_events.txt"
+    if events_path.exists():
+        df_events = parse_events_file(str(events_path), rec_start)
+    else:
+        df_events = pd.DataFrame()
+        logger.warning(f"{p_id}: No events file — all windows will be Normal.")
 
-    # Step 2: Windowing (no upsampling for SP02)
-    flow_wins, flow_times = extract_windows(flow, config.FS_FLOW, config.WINDOW_SEC, config.STEP_SEC)
-    thorac_wins, _ = extract_windows(thorac, config.FS_FLOW, config.WINDOW_SEC, config.STEP_SEC)
-    spo2_wins, _ = extract_windows(spo2, config.FS_SPO2, config.WINDOW_SEC, config.STEP_SEC)
+    # 3. Filter
+    flow_filtered = apply_bandpass(flow.values, fs=config.FS_FLOW)
+    thorac_filtered = apply_bandpass(thorac.values, fs=config.FS_FLOW)
+    spo2_filtered = apply_lowpass(spo2.values, fs=config.FS_SPO2)
 
-    # We must restrict to min logical chunks to avoid out-of-bounds at exactly the end
-    min_len = min(len(flow_wins), len(thorac_wins), len(spo2_wins))
-    
-    X_32 = []
-    X_4 = []
-    labels = []
-    flat_rows = [] # For CSV
-    
-    for i in range(min_len):
-        # 32Hz [2, 960]
-        x32 = np.vstack([flow_wins[i], thorac_wins[i]])
-        # 4Hz [1, 120]
-        x4 = np.array([spo2_wins[i]])
-        
-        win_start_sec = flow_times[i]
-        label_str = get_window_label(win_start_sec, config.WINDOW_SEC, df_events)
-        label_id = map_label_to_int(label_str)
-        
-        X_32.append(x32)
-        X_4.append(x4)
-        labels.append(label_id)
-        
-        # Flattening for CSV: Flow (960) + Thorac (960) + SpO2 (120) = 2040 features
-        row = [p_id, win_start_sec, config.WINDOW_SEC, label_str, label_id]
-        row.extend(x32[0].tolist()) # Flow
-        row.extend(x32[1].tolist()) # Thorac
-        row.extend(x4[0].tolist())  # SpO2
-        flat_rows.append(row)
+    # 4. Upsample SpO2 from 4Hz → 32Hz to match Flow/Thoracic length
+    spo2_upsampled = upsample_spo2(spo2_filtered, from_fs=config.FS_SPO2,
+                                   to_fs=config.FS_FLOW)
 
-    return {
-        "X_32": np.array(X_32, dtype=np.float32), 
-        "X_4": np.array(X_4, dtype=np.float32), 
-        "labels": np.array(labels, dtype=np.longlong),
-        "flat_rows": flat_rows
-    }
+    # 5. Align all signals to same minimum length
+    min_len = min(len(flow_filtered), len(thorac_filtered), len(spo2_upsampled))
+    flow_filtered = flow_filtered[:min_len]
+    thorac_filtered = thorac_filtered[:min_len]
+    spo2_upsampled = spo2_upsampled[:min_len]
 
-def main(in_dir: str):
-    participants = [d for d in os.listdir(in_dir) if os.path.isdir(os.path.join(in_dir, d))]
+    # 6. Extract windows
+    flow_wins, win_starts = extract_windows(flow_filtered, config.FS_FLOW,
+                                            config.WINDOW_SEC, config.STEP_SEC)
+    thorac_wins, _ = extract_windows(thorac_filtered, config.FS_FLOW,
+                                     config.WINDOW_SEC, config.STEP_SEC)
+    spo2_wins, _ = extract_windows(spo2_upsampled, config.FS_FLOW,
+                                   config.WINDOW_SEC, config.STEP_SEC)
+
+    n = min(len(flow_wins), len(thorac_wins), len(spo2_wins))
+
+    X, y, label_strs = [], [], []
+    for i in range(n):
+        # Stack 3 channels → (3, 960)
+        window = np.stack([flow_wins[i], thorac_wins[i], spo2_wins[i]], axis=0)
+        label_str = get_window_label(win_starts[i], config.WINDOW_SEC, df_events)
+
+        X.append(window)
+        label_strs.append(label_str)
+        y.append(label_to_int(label_str))
+
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.int64)
+
+    label_counts = {s: label_strs.count(s) for s in set(label_strs)}
+    logger.info(f"{p_id}: {len(X)} windows → {label_counts}")
+
+    return {"X": X, "y": y, "label_strs": label_strs, "p_id": p_id,
+            "win_starts": win_starts[:n]}
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main(in_dir: str, out_dir: str) -> None:
+    in_path = Path(in_dir)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    participants = sorted([d for d in in_path.iterdir() if d.is_dir()])
+    if not participants:
+        logger.error(f"No participant folders found in {in_path}")
+        return
+
     dataset_dict = {}
     csv_rows = []
-    
-    for p in tqdm(participants, desc="Processing Participants"):
-        p_path = os.path.join(in_dir, p)
-        res = process_participant(p_path)
-        if res:
-            dataset_dict[p] = {
-                "X_32": res["X_32"],
-                "X_4":  res["X_4"],
-                "y":    res["labels"]
-            }
-            csv_rows.extend(res["flat_rows"])
-            
-            logger.info(f"{p} Layout: X_32: {res['X_32'].shape}, X_4: {res['X_4'].shape}, y: {res['labels'].shape}")
 
-    # Generate CSV columns
-    cols = ['Participant', 'WinStartSec', 'WinDurSec', 'LabelStr', 'LabelID']
-    cols += [f'Flow_{i}' for i in range(config.FS_FLOW * config.WINDOW_SEC)]
-    cols += [f'Thorac_{i}' for i in range(config.FS_FLOW * config.WINDOW_SEC)]
-    cols += [f'SpO2_{i}' for i in range(config.FS_SPO2 * config.WINDOW_SEC)]
-    
-    df_out = pd.DataFrame(csv_rows, columns=cols)
-    
-    logger.info("Saving Data...")
-    
-    # Save CSV
-    csv_path = config.DATASET_DIR / "breathing_dataset.csv"
-    df_out.to_csv(csv_path, index=False)
-    logger.info(f"Saved CSV: {csv_path.stat().st_size / 1e6:.2f} MB")
-    
-    # Save Pickle
-    pkl_path = config.DATASET_DIR / "breathing_dataset.pkl"
-    with open(pkl_path, 'wb') as f:
+    for p_dir in tqdm(participants, desc="Processing"):
+        result = process_participant(p_dir)
+        if result is None:
+            continue
+
+        p_id = result["p_id"]
+        dataset_dict[p_id] = {"X": result["X"], "y": result["y"]}
+
+        # Flatten for CSV: participant ID + label + 3*960 = 2882 columns
+        for i, (x_win, label_str, label_int, t_start) in enumerate(
+                zip(result["X"], result["label_strs"], result["y"],
+                    result["win_starts"])):
+            row = [p_id, round(t_start, 2), label_str, label_int]
+            row.extend(x_win.flatten().tolist())
+            csv_rows.append(row)
+
+    # Build CSV column names
+    n_pts = config.WINDOW_SEC * config.FS_FLOW  # 960
+    cols = ["Participant", "WinStart_s", "LabelStr", "LabelInt"]
+    cols += [f"Flow_{i}" for i in range(n_pts)]
+    cols += [f"Thorac_{i}" for i in range(n_pts)]
+    cols += [f"SpO2_{i}" for i in range(n_pts)]
+
+    df = pd.DataFrame(csv_rows, columns=cols)
+
+    pkl_path = out_path / "breathing_dataset.pkl"
+    csv_path = out_path / "breathing_dataset.csv"
+
+    with open(pkl_path, "wb") as f:
         pickle.dump(dataset_dict, f)
-    logger.info(f"Saved PKL: {pkl_path.stat().st_size / 1e6:.2f} MB")
+    logger.info(f"Saved PKL: {pkl_path} ({pkl_path.stat().st_size / 1e6:.1f} MB)")
 
-    val_counts = df_out['LabelStr'].value_counts()
-    logger.info(f"Final Global Label Distribution:\n{val_counts}")
+    df.to_csv(csv_path, index=False)
+    logger.info(f"Saved CSV: {csv_path} ({csv_path.stat().st_size / 1e6:.1f} MB)")
+
+    logger.info("\n=== GLOBAL LABEL DISTRIBUTION ===")
+    logger.info(str(df["LabelStr"].value_counts()))
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-in_dir", type=str, default="Data")
+    parser = argparse.ArgumentParser(description="Create windowed dataset from raw signals.")
+    parser.add_argument("-in_dir", type=str, default="Data",
+                        help="Root directory containing participant folders.")
+    parser.add_argument("-out_dir", type=str, default="Dataset",
+                        help="Output directory for CSV and PKL files.")
     args = parser.parse_args()
-    main(args.in_dir)
+    main(args.in_dir, args.out_dir)
