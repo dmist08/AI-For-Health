@@ -12,9 +12,6 @@ Visualizations/
 colab_notebooks/.ipynb_checkpoints/
 .ipynb_checkpoints/
 
-# Assignment and Planning Documents
-AI for Health - SRIP 2026.pdf
-AI for Health - SRIP 2026.txt
-AP_01_report.pdf
-Claude_plan.md
-Gemini_plan.md
+*.zip
+*.pdf
+*.txt
