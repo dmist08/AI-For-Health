@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+.DS_Store
+internship/Data/
+Data/
+Dataset/
+results/
+Visualizations/
+colab_notebooks/.ipynb_checkpoints/
+.ipynb_checkpoints/
