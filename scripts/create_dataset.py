@@ -151,11 +151,13 @@ def process_participant(p_dir: Path) -> dict | None:
 
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int64)
+    # Store original label strings so training script can refilter for any mode
+    y_str = np.array(label_strs)
 
     label_counts = {s: label_strs.count(s) for s in set(label_strs)}
     logger.info(f"{p_id}: {len(X)} windows → {label_counts}")
 
-    return {"X": X, "y": y, "label_strs": label_strs, "p_id": p_id,
+    return {"X": X, "y": y, "y_str": y_str, "p_id": p_id,
             "win_starts": win_starts[:n]}
 
 
@@ -180,7 +182,7 @@ def main(in_dir: str, out_dir: str) -> None:
             continue
 
         p_id = result["p_id"]
-        dataset_dict[p_id] = {"X": result["X"], "y": result["y"]}
+        dataset_dict[p_id] = {"X": result["X"], "y": result["y"], "y_str": result["y_str"]}
 
         # Flatten for CSV: participant ID + label + 3*960 = 2882 columns
         for i, (x_win, label_str, label_int, t_start) in enumerate(
