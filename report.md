@@ -1,6 +1,16 @@
 # AI for Health — SRIP 2026 Project Report
 **Objective:** Detecting breathing irregularities (Apnea and Hypopnea) from overnight physiological sleep data.
 
+## AI Tool Disclosure
+As required by the assignment guidelines, I am explicitly disclosing the use of AI assistants (Gemini/Claude) during the development of this project. 
+
+The AI was utilized primarily as a senior technical sounding board to:
+1. Discuss and validate the multi-branch 1D CNN architecture to handle differing sampling rates (32 Hz vs 4 Hz).
+2. Assist in writing robust boilerplate code for Pandas time-series alignment and PyTorch DataLoaders.
+3. Help structure the cross-validation loop to prevent data leakage during LOOCV.
+
+I have thoroughly reviewed, tested, and comprehended every line of code in this repository and am fully prepared to explain the architectural decisions, filtering logic, and metric evaluations during the one-on-one discussion.
+
 ## 1. Introduction and Data Exploration
 The provided dataset contained overnight sleep data from 5 participants (AP01–AP05). The signals provided are standard medical indicators for respiratory distress during sleep:
 *   **Nasal Airflow** (32 Hz): Direct measurement of respiration inhalation/exhalation volume.
