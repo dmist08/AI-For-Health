@@ -1,17 +1,17 @@
 # AI for Health — SRIP 2026 Project
 
 ## Project Overview
-This repository contains the complete implementation for the SRIP 2026 Health Sensing assignment, focusing on detecting breathing irregularities (Apnea and Hypopnea) during sleep using Multi-Branch 1D Convolutional Neural Networks.
+This repository contains the complete implementation for the SRIP 2026 Health Sensing assignment, focusing on detecting breathing irregularities (Apnea and Hypopnea) during sleep using a **Single-Branch 1D Convolutional Neural Network** (36,418 parameters).
 
-## ⚠️ AI Tool Disclosure
-As required by the assignment guidelines, I am explicitly disclosing the use of AI assistants (Gemini/Claude) during the development of this project. 
+## ⚠️ AI Tool Disclosure (Required by Assignment Guidelines)
+As required by the assignment guidelines, I am explicitly disclosing the use of AI assistants (Gemini and Claude) during the development of this project. 
 
 The AI was utilized primarily as a senior technical sounding board to:
-1. Discuss and validate the multi-branch 1D CNN architecture to handle differing sampling rates (32 Hz vs 4 Hz).
-2. Assist in writing robust boilerplate code for Pandas time-series alignment and PyTorch DataLoaders.
-3. Help structure the cross-validation loop to prevent data leakage during LOOCV.
+1. Validate the 1D CNN architecture and the approach of upsampling SpO2 via polyphase resampling for a unified single-branch input.
+2. Assist with boilerplate code for Pandas time-series alignment and PyTorch DataLoaders.
+3. Structure the LOPO cross-validation loop to prevent normalisation leakage.
 
-I have thoroughly reviewed, tested, and comprehended every line of code in this repository and am fully prepared to explain the architectural decisions, filtering logic, and metric evaluations during the one-on-one discussion.
+I have thoroughly reviewed, tested, and comprehended every line of code in this repository and am fully prepared to explain all architectural decisions, filtering logic, and metric evaluations during the one-on-one discussion.
 
 ## Repository Structure
 

@@ -5,13 +5,12 @@ __pycache__/
 logs/
 .DS_Store
 internship/Data/
-Data/
 Dataset/
 results/
-Visualizations/
 colab_notebooks/.ipynb_checkpoints/
 .ipynb_checkpoints/
 
 *.zip
-*.pdf
-*.txt
+*.tex
+report_final.tex
+report.md
